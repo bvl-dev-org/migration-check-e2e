@@ -1,0 +1,6 @@
+  table_name   | estimated_rows | total_bytes
+---------------+----------------+-------------
+ orders        |       48213664 | 12240512000
+ customers     |         310442 |   164626432
+ feature_flags |            212 |       49152
+(3 rows)

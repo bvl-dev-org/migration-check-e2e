@@ -1,0 +1,163 @@
+# End-to-end test of bvl-dev-org/migration-check (spec 7.2.9, 13.4). Each job runs the Action once and then checks the one
+# PR comment, so the jobs run in sequence. Secrets: BVL_LICENSE_KEY (a key of an account with Migration check),
+# BVL_REVOKED_KEY (a revoked key). Variable: BVL_ENGINE_URL (empty = https://bvl.dev; the preview URL before R2).
+name: BVL Migration check end-to-end
+on: pull_request
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  measured:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: check
+        uses: bvl-dev-org/migration-check@v1
+        continue-on-error: true
+        env:
+          BVL_ENGINE_URL: ${{ vars.BVL_ENGINE_URL }}
+        with:
+          migrate-command: ./scripts/apply-new-migrations.sh
+          postgres-container: ${{ job.services.postgres.id }}
+          license-key: ${{ secrets.BVL_LICENSE_KEY }}
+          sizes-file: db/sizes.txt
+      - name: The check is red (1 statement to fix before merge, fail-on fix)
+        run: test "${{ steps.check.outcome }}" = failure
+      - run: ./scripts/expect-comment.sh measured
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+  measured-node24:
+    needs: measured
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: ./scripts/expect-comment.sh reset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+      - id: check
+        uses: bvl-dev-org/migration-check@v1
+        continue-on-error: true
+        env:
+          BVL_ENGINE_URL: ${{ vars.BVL_ENGINE_URL }}
+        with:
+          migrate-command: ./scripts/apply-new-migrations.sh
+          postgres-container: ${{ job.services.postgres.id }}
+          license-key: ${{ secrets.BVL_LICENSE_KEY }}
+          sizes-file: db/sizes.txt
+      - name: The check is red on Node 24 too
+        run: test "${{ steps.check.outcome }}" = failure
+      - run: ./scripts/expect-comment.sh measured
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+  revoked:
+    needs: measured-node24
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: check
+        uses: bvl-dev-org/migration-check@v1
+        env:
+          BVL_ENGINE_URL: ${{ vars.BVL_ENGINE_URL }}
+        with:
+          migrate-command: ./scripts/apply-new-migrations.sh
+          postgres-container: ${{ job.services.postgres.id }}
+          license-key: ${{ secrets.BVL_REVOKED_KEY }}
+          sizes-file: db/sizes.txt
+      - run: ./scripts/expect-comment.sh revoked
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+  http500:
+    needs: revoked
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Start an engine that answers HTTP 500
+        run: |
+          nohup node scripts/fake-engine.mjs 500 8500 > "$RUNNER_TEMP/fake-engine.log" 2>&1 &
+          sleep 1
+      - id: check
+        uses: bvl-dev-org/migration-check@v1
+        env:
+          BVL_ENGINE_URL: http://127.0.0.1:8500/api/v1/migration-check
+        with:
+          migrate-command: ./scripts/apply-new-migrations.sh
+          postgres-container: ${{ job.services.postgres.id }}
+          license-key: ${{ secrets.BVL_LICENSE_KEY }}
+          sizes-file: db/sizes.txt
+      - run: ./scripts/expect-comment.sh http500
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+  timeout:
+    needs: http500
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Start an engine that never answers
+        run: |
+          nohup node scripts/fake-engine.mjs hang 8501 > "$RUNNER_TEMP/fake-engine.log" 2>&1 &
+          sleep 1
+      - id: check
+        uses: bvl-dev-org/migration-check@v1
+        env:
+          BVL_ENGINE_URL: http://127.0.0.1:8501/api/v1/migration-check
+        with:
+          migrate-command: ./scripts/apply-new-migrations.sh
+          postgres-container: ${{ job.services.postgres.id }}
+          license-key: ${{ secrets.BVL_LICENSE_KEY }}
+          sizes-file: db/sizes.txt
+      - run: ./scripts/expect-comment.sh timeout
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
